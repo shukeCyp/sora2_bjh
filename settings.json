@@ -1,0 +1,11 @@
+{
+  "llm_api_key": "",
+  "llm_api_proxy": "https://api.shaohua.fun/v1",
+  "llm_model": "gemini-3-flash-preview",
+  "title_style": "简洁",
+  "title_prompt": "根据视频内容生成一个吸引人的标题",
+  "download_threads": 20,
+  "auto_download": true,
+  "auto_retry": true,
+  "max_retries": 3
+}
