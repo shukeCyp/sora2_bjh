@@ -1,9 +1,9 @@
 {
-  "llm_api_key": "",
-  "llm_api_proxy": "https://api.shaohua.fun/v1",
+  "llm_api_key": "sk-uXZW4Tnvm1i3LPFt9TUF6d3WK0NLTMdfDQrZEhq2QRtReSTs",
+  "llm_api_proxy": "https://api.shaohua.fun/v1/",
   "llm_model": "gemini-3-flash-preview",
-  "title_style": "简洁",
-  "title_prompt": "根据视频内容生成一个吸引人的标题",
+  "title_style": "创意",
+  "title_prompt": "只返回一个中文视频标题，不要返回任何解释或额外内容；不使用引号、编号、前后缀；不换行；不超过30字，风格有趣吸引人，不要出现中国、政治等字眼",
   "download_threads": 20,
   "auto_download": true,
   "auto_retry": true,

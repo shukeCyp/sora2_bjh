@@ -296,13 +296,14 @@ class APIWorker(QThread):
 
     def call_api(self, task: VideoTask) -> tuple:
         """调用 API 生成视频"""
+        import re
         print(f"[API] 任务 {task.row_index} 开始调用API - prompt: {task.prompt[:50]}...")
 
         if self.is_stopped():
             print(f"[API] 任务 {task.row_index} 已取消")
             return False, "任务已取消"
 
-        model = "sora-video-portrait-10s"
+        model = "sora2-portrait-10s"
         print(f"[API] 任务 {task.row_index} 使用模型: {model}")
 
         payload = {
@@ -333,6 +334,7 @@ class APIWorker(QThread):
                 return False, f"HTTP错误: {response.status_code}"
 
             video_url = None
+            full_content = ""  # 累积content内容
 
             for line in response.iter_lines():
                 if self.is_stopped():
@@ -356,33 +358,56 @@ class APIWorker(QThread):
                         if choices:
                             delta = choices[0].get('delta', {})
 
-                            # 检查进度
+                            # 检查进度 - 支持新格式（字符串）和旧格式（字典）
                             reasoning = delta.get('reasoning_content')
-                            if reasoning and isinstance(reasoning, dict):
-                                progress = reasoning.get('progress', 0)
-                                message = reasoning.get('message', '')
-                                if progress:
-                                    print(f"[API] 任务 {task.row_index} 进度: {progress}% - {message}")
-                                    self.task_progress.emit(task.row_index, progress, message)
+                            if reasoning:
+                                if isinstance(reasoning, dict):
+                                    # 旧格式：字典
+                                    progress = reasoning.get('progress', 0)
+                                    message = reasoning.get('message', '')
+                                    if progress:
+                                        print(f"[API] 任务 {task.row_index} 进度: {progress}% - {message}")
+                                        self.task_progress.emit(task.row_index, progress, message)
+                                elif isinstance(reasoning, str):
+                                    # 新格式：字符串，解析进度
+                                    # 匹配格式如: "**Video Generation Progress**: 40% (queued)"
+                                    progress_match = re.search(r'(\d+)%', reasoning)
+                                    if progress_match:
+                                        progress = int(progress_match.group(1))
+                                        message = reasoning.strip()
+                                        print(f"[API] 任务 {task.row_index} 进度: {progress}% - {message}")
+                                        self.task_progress.emit(task.row_index, progress, message)
 
                             # 检查最终结果
                             content = delta.get('content')
                             if content:
+                                full_content += content
+                                
+                                # 尝试旧格式：JSON
                                 try:
                                     result = json.loads(content)
                                     if result.get('type') == 'video':
                                         video_url = result.get('url')
-                                        print(f"[API] 任务 {task.row_index} 获取到视频URL: {video_url}")
+                                        print(f"[API] 任务 {task.row_index} 获取到视频URL (JSON格式): {video_url}")
                                 except json.JSONDecodeError:
                                     pass
                     except json.JSONDecodeError:
                         continue
+
+            # 如果没有从JSON获取到URL，尝试从HTML格式解析
+            if not video_url and full_content:
+                # 匹配格式: <video src='URL' 或 <video src="URL"
+                video_match = re.search(r"<video[^>]+src=['\"]([^'\"]+)['\"]", full_content)
+                if video_match:
+                    video_url = video_match.group(1)
+                    print(f"[API] 任务 {task.row_index} 获取到视频URL (HTML格式): {video_url}")
 
             if video_url:
                 print(f"[API] 任务 {task.row_index} 成功完成")
                 return True, video_url
             else:
                 print(f"[API] 任务 {task.row_index} 失败: 未获取到视频URL")
+                print(f"[API] 任务 {task.row_index} 完整content内容: {full_content[:500]}")
                 return False, "未获取到视频URL"
 
         except requests.exceptions.Timeout:
