@@ -511,8 +511,8 @@ class DownloadWorker(QThread):
         self._mutex.unlock()
         return stopped
 
-    def generate_title(self, prompt: str) -> str:
-        """调用AI生成视频标题"""
+    def generate_title(self, prompt: str, max_retries: int = 3) -> Optional[str]:
+        """调用AI生成视频标题，失败时重试最多max_retries次，全部失败返回None"""
         api_key = self.config.get("llm_api_key", "")
         api_proxy = self.config.get("llm_api_proxy", "https://api.openai.com/v1")
         model = self.config.get("llm_model", "gpt-3.5-turbo")
@@ -528,10 +528,8 @@ class DownloadWorker(QThread):
         print(f"[AI标题] 配置 - Custom Prompt: {custom_prompt[:50] if custom_prompt else '未设置'}")
 
         if not api_key:
-            print(f"[AI标题] 警告：API Key未设置，使用降级方案")
-            fallback = prompt[:20].replace("/", "_").replace("\\", "_")
-            print(f"[AI标题] 降级标题: {fallback}")
-            return fallback
+            print(f"[AI标题] 错误：API Key未设置，无法生成标题")
+            return None
 
         # 风格提示词
         style_prompts = {
@@ -554,152 +552,103 @@ class DownloadWorker(QThread):
 5. 不要有特殊字符如 / \\ : * ? " < > |"""
 
         user_message = f"视频内容：{prompt}"
+        url = f"{api_proxy.rstrip('/')}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message}
+            ],
+            "temperature": 0.8,
+            "max_tokens": 8196,
+            "top_p": 1.0
+        }
 
-        try:
-            url = f"{api_proxy.rstrip('/')}/chat/completions"
-            print(f"[AI标题] 请求URL: {url}")
+        last_error = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                print(f"[AI标题] 第 {attempt}/{max_retries} 次尝试...")
+                print(f"[AI标题] 请求URL: {url}")
+                print(f"[AI标题] 发送请求中...")
+                
+                response = requests.post(url, headers=headers, json=payload, timeout=300)
 
-            headers = {
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json"
-            }
-            print(f"[AI标题] 请求头:")
-            print(f"[AI标题]   - Authorization: Bearer {api_key[:10]}...")
-            print(f"[AI标题]   - Content-Type: application/json")
+                print(f"[AI标题] 响应状态码: {response.status_code}")
 
-            payload = {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_message}
-                ],
-                "temperature": 0.8,
-                "max_tokens": 8196,
-                "top_p": 1.0
-            }
-            print(f"[AI标题] 请求体:")
-            print(f"[AI标题]   - model: {payload['model']}")
-            print(f"[AI标题]   - messages 数量: {len(payload['messages'])}")
-            print(f"[AI标题]   - messages[0]:")
-            print(f"[AI标题]     role: {payload['messages'][0]['role']}")
-            print(f"[AI标题]     content 长度: {len(payload['messages'][0]['content'])}")
-            print(f"[AI标题]     content (前200字): {payload['messages'][0]['content'][:200]}")
-            print(f"[AI标题]   - messages[1]:")
-            print(f"[AI标题]     role: {payload['messages'][1]['role']}")
-            print(f"[AI标题]     content: {payload['messages'][1]['content']}")
-            print(f"[AI标题]   - temperature: {payload['temperature']}")
-            print(f"[AI标题]   - max_tokens: {payload['max_tokens']}")
-            print(f"[AI标题]   - top_p: {payload['top_p']}")
-            print(f"[AI标题] 完整请求JSON:")
-            print(f"[AI标题] {json.dumps(payload, ensure_ascii=False, indent=2)}")
+                if response.status_code != 200:
+                    print(f"[AI标题] 错误：HTTP {response.status_code}")
+                    print(f"[AI标题] 响应内容: {response.text[:500]}")
+                    last_error = f"HTTP错误: {response.status_code}"
+                    continue
 
-            print(f"[AI标题] 发送请求中...")
-            response = requests.post(url, headers=headers, json=payload, timeout=300)
-
-            print(f"[AI标题] 响应状态码: {response.status_code}")
-            print(f"[AI标题] 响应头: {dict(response.headers)}")
-
-            if response.status_code != 200:
-                print(f"[AI标题] 错误：HTTP {response.status_code}")
-                print(f"[AI标题] 响应内容: {response.text[:500]}")
-                response.raise_for_status()
-
-            result = response.json()
-            print(f"[AI标题] 响应JSON:")
-            print(f"[AI标题]   - keys: {list(result.keys())}")
-            if 'choices' in result:
-                print(f"[AI标题]   - choices 数量: {len(result['choices'])}")
-                if result['choices']:
+                result = response.json()
+                print(f"[AI标题] 响应JSON keys: {list(result.keys())}")
+                
+                if 'choices' in result and result['choices']:
                     choice = result['choices'][0]
-                    print(f"[AI标题]   - choices[0] keys: {list(choice.keys())}")
                     if 'finish_reason' in choice:
                         finish_reason = choice['finish_reason']
-                        print(f"[AI标题]   - finish_reason: {finish_reason}")
-                        if finish_reason == "length":
-                            print(f"[AI标题]   ⚠️ 警告：finish_reason=length，说明模型输出被截断")
-                        elif finish_reason == "stop":
-                            print(f"[AI标题]   ✓ finish_reason=stop，正常完成")
-                    if 'message' in choice:
-                        msg = choice['message']
-                        print(f"[AI标题]   - message keys: {list(msg.keys())}")
-                        if 'content' in msg:
-                            content = msg['content']
-                            print(f"[AI标题]   - content 长度: {len(content)}")
-                            print(f"[AI标题]   - content: '{content}'")
-                            if not content or content.strip() == "":
-                                print(f"[AI标题] 警告：content 为空！")
-            if 'usage' in result:
-                usage = result['usage']
-                print(f"[AI标题]   - usage:")
-                print(f"[AI标题]     prompt_tokens: {usage.get('prompt_tokens', 0)}")
-                print(f"[AI标题]     completion_tokens: {usage.get('completion_tokens', 0)}")
-                completion_details = usage.get('completion_tokens_details', {})
-                if completion_details:
-                    print(f"[AI标题]     completion_tokens_details:")
-                    print(f"[AI标题]       text_tokens: {completion_details.get('text_tokens', 0)}")
-                    print(f"[AI标题]       reasoning_tokens: {completion_details.get('reasoning_tokens', 0)}")
-                    if completion_details.get('reasoning_tokens', 0) > 0 and completion_details.get('text_tokens', 0) == 0:
-                        print(f"[AI标题]       ⚠️ 警告：只有推理token，没有文本token！")
-                print(f"[AI标题]     total_tokens: {usage.get('total_tokens', 0)}")
+                        print(f"[AI标题] finish_reason: {finish_reason}")
+                    if 'message' in choice and 'content' in choice['message']:
+                        content = choice['message']['content']
+                        print(f"[AI标题] content: '{content}'")
 
-            title = result['choices'][0]['message']['content'].strip()
-            print(f"[AI标题] 原始标题: '{title}'")
-            print(f"[AI标题] 原始标题长度: {len(title)}")
+                if 'usage' in result:
+                    usage = result['usage']
+                    print(f"[AI标题] usage - prompt_tokens: {usage.get('prompt_tokens', 0)}, completion_tokens: {usage.get('completion_tokens', 0)}")
 
-            if not title:
-                print(f"[AI标题] 警告：标题为空，使用降级方案")
-                fallback = prompt[:20]
+                title = result['choices'][0]['message']['content'].strip()
+                print(f"[AI标题] 原始标题: '{title}'")
+
+                if not title:
+                    print(f"[AI标题] 警告：标题为空")
+                    last_error = "标题内容为空"
+                    continue
+
+                # 清理特殊字符
+                original_title = title
                 for char in ['/', '\\', ':', '*', '?', '"', '<', '>', '|', '\n', '\r']:
-                    fallback = fallback.replace(char, '_')
-                print(f"[AI标题] ========== 标题生成失败（内容为空）==========")
-                print(f"[AI标题] 降级标题: {fallback}\n")
-                return fallback
+                    title = title.replace(char, '_')
 
-            # 清理特殊字符
-            original_title = title
-            for char in ['/', '\\', ':', '*', '?', '"', '<', '>', '|', '\n', '\r']:
-                title = title.replace(char, '_')
+                if title != original_title:
+                    print(f"[AI标题] 清理后标题: {title}")
 
-            if title != original_title:
-                print(f"[AI标题] 清理后标题: {title}")
+                final_title = title.strip('"\'""''')
+                print(f"[AI标题] 最终标题: '{final_title}'")
+                print(f"[AI标题] ========== 标题生成成功 ==========\n")
+                return final_title
 
-            final_title = title.strip('"\'""''')
-            print(f"[AI标题] 最终标题: '{final_title}'")
-            print(f"[AI标题] ========== 标题生成成功 ==========\n")
-            return final_title
+            except requests.exceptions.Timeout as e:
+                print(f"[AI标题] 第 {attempt} 次尝试失败：请求超时 - {str(e)}")
+                last_error = f"请求超时: {str(e)}"
+            except requests.exceptions.ConnectionError as e:
+                print(f"[AI标题] 第 {attempt} 次尝试失败：连接失败 - {str(e)}")
+                last_error = f"连接失败: {str(e)}"
+            except requests.exceptions.RequestException as e:
+                print(f"[AI标题] 第 {attempt} 次尝试失败：请求异常 - {str(e)}")
+                last_error = f"请求异常: {str(e)}"
+            except json.JSONDecodeError as e:
+                print(f"[AI标题] 第 {attempt} 次尝试失败：JSON解析失败 - {str(e)}")
+                last_error = f"JSON解析失败: {str(e)}"
+            except KeyError as e:
+                print(f"[AI标题] 第 {attempt} 次尝试失败：响应格式错误，缺少字段 {str(e)}")
+                last_error = f"响应格式错误: {str(e)}"
+            except Exception as e:
+                print(f"[AI标题] 第 {attempt} 次尝试失败：未知异常 - {type(e).__name__}: {str(e)}")
+                last_error = f"未知异常: {str(e)}"
 
-        except requests.exceptions.Timeout as e:
-            print(f"[AI标题] 错误：请求超时 - {str(e)}")
-            print(f"[AI标题] 使用降级方案")
-        except requests.exceptions.ConnectionError as e:
-            print(f"[AI标题] 错误：连接失败 - {str(e)}")
-            print(f"[AI标题] 请检查 API Proxy 地址是否正确: {api_proxy}")
-            print(f"[AI标题] 使用降级方案")
-        except requests.exceptions.RequestException as e:
-            print(f"[AI标题] 错误：请求异常 - {str(e)}")
-            print(f"[AI标题] 使用降级方案")
-        except json.JSONDecodeError as e:
-            print(f"[AI标题] 错误：JSON解析失败 - {str(e)}")
-            print(f"[AI标题] 响应内容: {response.text[:500]}")
-            print(f"[AI标题] 使用降级方案")
-        except KeyError as e:
-            print(f"[AI标题] 错误：响应格式错误，缺少字段 {str(e)}")
-            print(f"[AI标题] 完整响应: {result}")
-            print(f"[AI标题] 使用降级方案")
-        except Exception as e:
-            print(f"[AI标题] 错误：未知异常 - {type(e).__name__}: {str(e)}")
-            import traceback
-            print(f"[AI标题] 堆栈跟踪:")
-            print(traceback.format_exc())
-            print(f"[AI标题] 使用降级方案")
+            if attempt < max_retries:
+                print(f"[AI标题] 等待1秒后重试...")
+                import time
+                time.sleep(1)
 
-        # 失败时使用prompt前20个字符
-        fallback = prompt[:20]
-        for char in ['/', '\\', ':', '*', '?', '"', '<', '>', '|', '\n', '\r']:
-            fallback = fallback.replace(char, '_')
-        print(f"[AI标题] ========== 标题生成失败，使用降级标题 ==========")
-        print(f"[AI标题] 降级标题: {fallback}\n")
-        return fallback
+        print(f"[AI标题] ========== 标题生成失败（已重试{max_retries}次）==========")
+        print(f"[AI标题] 最后一次错误: {last_error}\n")
+        return None
 
     def download_video(self, task: VideoTask) -> tuple:
         """下载单个视频"""
@@ -710,9 +659,14 @@ class DownloadWorker(QThread):
             return False, "没有视频URL"
 
         try:
-            # 生成AI标题
+            # 生成AI标题（失败时重试3次）
             self.task_started.emit(task.row_index, "正在生成标题...")
-            title = self.generate_title(task.prompt)
+            title = self.generate_title(task.prompt, max_retries=3)
+            
+            if title is None:
+                print(f"[下载] 任务 {task.row_index} 标题生成失败")
+                return False, "标题生成失败（已重试3次）"
+            
             print(f"[下载] 任务 {task.row_index} 生成标题: {title}")
 
             if self.is_stopped():
@@ -842,6 +796,10 @@ class MainWindow(QMainWindow):
         self.import_btn = QPushButton("导入 CSV")
         self.import_btn.clicked.connect(self.import_csv)
         button_layout.addWidget(self.import_btn)
+
+        self.import_folder_btn = QPushButton("导入文件夹")
+        self.import_folder_btn.clicked.connect(self.import_folder)
+        button_layout.addWidget(self.import_folder_btn)
 
         self.start_btn = QPushButton("开始生成")
         self.start_btn.clicked.connect(self.start_generation)
@@ -999,6 +957,135 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"[CSV] 导入错误: {str(e)}")
             QMessageBox.critical(self, "导入错误", f"无法读取 CSV 文件:\n{str(e)}")
+
+    def import_folder(self):
+        """导入文件夹，递归扫描所有 CSV 文件"""
+        print("[文件夹导入] 开始选择文件夹...")
+        folder_path = QFileDialog.getExistingDirectory(
+            self, "选择文件夹", ""
+        )
+
+        if not folder_path:
+            print("[文件夹导入] 用户取消选择文件夹")
+            return
+
+        print(f"[文件夹导入] 选择文件夹: {folder_path}")
+
+        # 递归查找所有 CSV 文件
+        csv_files = []
+        for root, dirs, files in os.walk(folder_path):
+            for file in files:
+                if file.lower().endswith('.csv'):
+                    csv_files.append(os.path.join(root, file))
+
+        if not csv_files:
+            print("[文件夹导入] 未找到 CSV 文件")
+            QMessageBox.warning(self, "警告", "所选文件夹中没有找到 CSV 文件")
+            return
+
+        print(f"[文件夹导入] 找到 {len(csv_files)} 个 CSV 文件")
+
+        # 询问用户是否继续
+        reply = QMessageBox.question(
+            self, "确认导入",
+            f"在文件夹中找到 {len(csv_files)} 个 CSV 文件:\n\n" +
+            "\n".join([os.path.basename(f) for f in csv_files[:10]]) +
+            ("\n..." if len(csv_files) > 10 else "") +
+            f"\n\n是否全部导入？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes
+        )
+
+        if reply != QMessageBox.Yes:
+            print("[文件夹导入] 用户取消导入")
+            return
+
+        # 清空现有数据
+        self.tasks.clear()
+        self.table.setRowCount(0)
+
+        # 状态映射：从中文状态值到枚举
+        status_map = {
+            "待处理": TaskStatus.PENDING,
+            "处理中": TaskStatus.PROCESSING,
+            "成功": TaskStatus.SUCCESS,
+            "失败": TaskStatus.FAILED,
+        }
+
+        total_imported = 0
+        failed_files = []
+
+        for csv_path in csv_files:
+            try:
+                # 自动检测文件编码
+                detected_encoding = detect_encoding(csv_path)
+                print(f"[文件夹导入] 正在导入: {csv_path} (编码: {detected_encoding})")
+
+                with open(csv_path, 'r', encoding=detected_encoding, errors='replace') as f:
+                    reader = csv.DictReader(f)
+
+                    for row in reader:
+                        # 解析状态（支持导出的结果文件）
+                        status_str = row.get('status', '').strip()
+                        status = status_map.get(status_str, TaskStatus.PENDING)
+
+                        # 获取视频URL（支持导出的结果文件）
+                        video_url = row.get('video_url', '').strip() or None
+
+                        # 获取错误信息
+                        error_msg = row.get('error_msg', '').strip() or None
+
+                        # 获取下载路径
+                        download_path = row.get('download_path', '').strip() or None
+
+                        row_index = len(self.tasks)
+                        task = VideoTask(
+                            row_index=row_index,
+                            image_path=row.get('image_path', ''),
+                            prompt=row.get('prompt', ''),
+                            resolution=row.get('resolution', 'landscape'),
+                            duration=row.get('duration', '10s'),
+                            status=status,
+                            progress=100 if status == TaskStatus.SUCCESS else 0,
+                            video_url=video_url,
+                            error_msg=error_msg,
+                            download_path=download_path
+                        )
+                        self.tasks.append(task)
+                        self.add_table_row(task)
+                        total_imported += 1
+
+            except Exception as e:
+                print(f"[文件夹导入] 导入文件失败: {csv_path}, 错误: {str(e)}")
+                failed_files.append((csv_path, str(e)))
+
+        # 统计导入结果
+        success_count = sum(1 for t in self.tasks if t.status == TaskStatus.SUCCESS)
+        failed_count = sum(1 for t in self.tasks if t.status == TaskStatus.FAILED)
+        pending_count = sum(1 for t in self.tasks if t.status == TaskStatus.PENDING)
+
+        print(f"[文件夹导入] 成功导入 {total_imported} 条记录")
+        print(f"[文件夹导入] 状态统计 - 成功: {success_count}, 失败: {failed_count}, 待处理: {pending_count}")
+
+        has_tasks = len(self.tasks) > 0
+        self.start_btn.setEnabled(has_tasks and pending_count > 0)
+        self.download_btn.setEnabled(has_tasks and success_count > 0)
+        self.retry_btn.setEnabled(has_tasks and failed_count > 0)
+        self.export_btn.setEnabled(has_tasks)
+        self.update_stats()
+
+        # 显示导入结果
+        msg = f"从 {len(csv_files)} 个文件中导入了 {total_imported} 条记录"
+        if success_count > 0 or failed_count > 0:
+            msg += f"\n(成功: {success_count}, 失败: {failed_count}, 待处理: {pending_count})"
+
+        if failed_files:
+            msg += f"\n\n有 {len(failed_files)} 个文件导入失败"
+            self.statusBar.showMessage(f"导入完成 (有 {len(failed_files)} 个文件失败)")
+            QMessageBox.warning(self, "导入完成", msg)
+        else:
+            self.statusBar.showMessage(f"已导入 {total_imported} 条记录 (来自 {len(csv_files)} 个文件)")
+            QMessageBox.information(self, "导入成功", msg)
 
     def add_table_row(self, task: VideoTask):
         """添加表格行"""
@@ -1393,7 +1480,7 @@ class MainWindow(QMainWindow):
     def _do_auto_download(self, task: VideoTask, save_dir: str):
         """执行自动下载（在后台线程中执行）"""
         try:
-            # 生成标题
+            # 生成标题（失败时重试3次）
             api_key = self.config.get("llm_api_key", "")
             api_proxy = self.config.get("llm_api_proxy", "https://api.openai.com/v1")
             model = self.config.get("llm_model", "gpt-3.5-turbo")
@@ -1401,8 +1488,22 @@ class MainWindow(QMainWindow):
             custom_prompt = self.config.get("title_prompt", "")
 
             title = self._generate_title_for_auto_download(
-                task.prompt, api_key, api_proxy, model, style, custom_prompt
+                task.prompt, api_key, api_proxy, model, style, custom_prompt, max_retries=3
             )
+            
+            if title is None:
+                print(f"[自动下载] 任务 {task.row_index} 标题生成失败（已重试3次）")
+                # 更新任务状态为失败
+                task.status = TaskStatus.FAILED
+                task.error_msg = "标题生成失败（已重试3次）"
+                QMetaObject.invokeMethod(
+                    self, "_update_task_failed_slot",
+                    Qt.QueuedConnection,
+                    Q_ARG(int, task.row_index),
+                    Q_ARG(str, "标题生成失败（已重试3次）")
+                )
+                return
+            
             print(f"[自动下载] 任务 {task.row_index} 生成标题: {title}")
 
             # 下载视频
@@ -1439,6 +1540,14 @@ class MainWindow(QMainWindow):
 
         except Exception as e:
             print(f"[自动下载] 任务 {task.row_index} 下载失败: {e}")
+            task.status = TaskStatus.FAILED
+            task.error_msg = str(e)
+            QMetaObject.invokeMethod(
+                self, "_update_task_failed_slot",
+                Qt.QueuedConnection,
+                Q_ARG(int, task.row_index),
+                Q_ARG(str, str(e))
+            )
 
     @pyqtSlot(int, str)
     def _update_download_path_slot(self, row_index: int, file_path: str):
@@ -1447,12 +1556,24 @@ class MainWindow(QMainWindow):
             self.tasks[row_index].download_path = file_path
             self.update_table_row(row_index, TaskStatus.SUCCESS, 100, download_path=file_path)
 
+    @pyqtSlot(int, str)
+    def _update_task_failed_slot(self, row_index: int, error_msg: str):
+        """更新任务失败状态的槽函数（在主线程中执行）"""
+        if row_index < len(self.tasks):
+            self.tasks[row_index].status = TaskStatus.FAILED
+            self.tasks[row_index].error_msg = error_msg
+            self.update_table_row(row_index, TaskStatus.FAILED, 0, message=error_msg)
+            self.update_stats()
+
     def _generate_title_for_auto_download(self, prompt: str, api_key: str, api_proxy: str,
-                                          model: str, style: str, custom_prompt: str) -> str:
-        """为自动下载生成标题"""
+                                          model: str, style: str, custom_prompt: str,
+                                          max_retries: int = 3) -> Optional[str]:
+        """为自动下载生成标题，失败时重试最多max_retries次，全部失败返回None"""
+        import time
+        
         if not api_key:
-            fallback = prompt[:20].replace("/", "_").replace("\\", "_")
-            return fallback
+            print(f"[自动下载标题] 错误：API Key未设置")
+            return None
 
         # 风格提示词
         style_prompts = {
@@ -1475,41 +1596,58 @@ class MainWindow(QMainWindow):
 5. 不要有特殊字符如 / \\ : * ? " < > |"""
 
         user_message = f"视频内容：{prompt}"
+        url = f"{api_proxy.rstrip('/')}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message}
+            ],
+            "temperature": 0.8,
+            "max_tokens": 8196,
+            "top_p": 1.0
+        }
 
-        try:
-            url = f"{api_proxy.rstrip('/')}/chat/completions"
-            headers = {
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json"
-            }
-            payload = {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_message}
-                ],
-                "temperature": 0.8,
-                "max_tokens": 8196,
-                "top_p": 1.0
-            }
-
-            response = requests.post(url, headers=headers, json=payload, timeout=30)
-            if response.status_code == 200:
+        last_error = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                print(f"[自动下载标题] 第 {attempt}/{max_retries} 次尝试...")
+                response = requests.post(url, headers=headers, json=payload, timeout=30)
+                
+                if response.status_code != 200:
+                    print(f"[自动下载标题] HTTP错误: {response.status_code}")
+                    last_error = f"HTTP错误: {response.status_code}"
+                    continue
+                    
                 result = response.json()
                 title = result['choices'][0]['message']['content'].strip()
-                if title:
-                    # 清理特殊字符
-                    for char in ['/', '\\', ':', '*', '?', '"', '<', '>', '|', '\n', '\r']:
-                        title = title.replace(char, '_')
-                    return title.strip('"\'""''')
-        except Exception as e:
-            print(f"[自动下载] 生成标题失败: {e}")
+                
+                if not title:
+                    print(f"[自动下载标题] 标题为空")
+                    last_error = "标题内容为空"
+                    continue
+                
+                # 清理特殊字符
+                for char in ['/', '\\', ':', '*', '?', '"', '<', '>', '|', '\n', '\r']:
+                    title = title.replace(char, '_')
+                
+                final_title = title.strip('"\'""''')
+                print(f"[自动下载标题] 生成成功: {final_title}")
+                return final_title
+                
+            except Exception as e:
+                print(f"[自动下载标题] 第 {attempt} 次尝试失败: {e}")
+                last_error = str(e)
+            
+            if attempt < max_retries:
+                time.sleep(1)
 
-        # 失败时使用prompt前20个字符
-        fallback = prompt[:20]
-        for char in ['/', '\\', ':', '*', '?', '"', '<', '>', '|', '\n', '\r']:
-            fallback = fallback.replace(char, '_')
-        return fallback
+        print(f"[自动下载标题] 标题生成失败（已重试{max_retries}次），最后错误: {last_error}")
+        return None
 
     def on_all_completed(self):
         """所有任务完成"""
