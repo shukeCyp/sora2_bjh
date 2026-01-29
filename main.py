@@ -303,7 +303,7 @@ class APIWorker(QThread):
             print(f"[API] 任务 {task.row_index} 已取消")
             return False, "任务已取消"
 
-        model = "sora2-portrait-10s"
+        model = "veo_3_1_t2v_fast_portrait"
         print(f"[API] 任务 {task.row_index} 使用模型: {model}")
 
         payload = {
@@ -826,6 +826,11 @@ class MainWindow(QMainWindow):
         self.export_btn.setEnabled(False)
         button_layout.addWidget(self.export_btn)
 
+        self.add_suffix_btn = QPushButton("添加后缀")
+        self.add_suffix_btn.clicked.connect(self.add_prompt_suffix)
+        self.add_suffix_btn.setEnabled(False)
+        button_layout.addWidget(self.add_suffix_btn)
+
         button_layout.addStretch()
 
         # 设置按钮放在右侧
@@ -947,6 +952,7 @@ class MainWindow(QMainWindow):
             self.download_btn.setEnabled(has_tasks and success_count > 0)
             self.retry_btn.setEnabled(has_tasks and failed_count > 0)
             self.export_btn.setEnabled(has_tasks)
+            self.add_suffix_btn.setEnabled(has_tasks)
             self.update_stats()
 
             msg = f"已导入 {len(self.tasks)} 条记录"
@@ -1072,6 +1078,7 @@ class MainWindow(QMainWindow):
         self.download_btn.setEnabled(has_tasks and success_count > 0)
         self.retry_btn.setEnabled(has_tasks and failed_count > 0)
         self.export_btn.setEnabled(has_tasks)
+        self.add_suffix_btn.setEnabled(has_tasks)
         self.update_stats()
 
         # 显示导入结果
@@ -1710,6 +1717,63 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"[导出] 导出错误: {str(e)}")
             QMessageBox.critical(self, "导出错误", f"无法保存文件:\n{str(e)}")
+
+    def add_prompt_suffix(self):
+        """添加提示词后缀"""
+        if not self.tasks:
+            QMessageBox.warning(self, "警告", "请先导入任务")
+            return
+
+        # 创建对话框
+        dialog = QDialog(self)
+        dialog.setWindowTitle("添加后缀")
+        dialog.setMinimumWidth(400)
+
+        layout = QVBoxLayout(dialog)
+
+        # 说明标签
+        label = QLabel("输入要添加到所有提示词末尾的后缀：")
+        layout.addWidget(label)
+
+        # 输入框
+        suffix_input = QTextEdit()
+        suffix_input.setPlaceholderText("例如：人物必须都是中国人，场景是中国场景...")
+        suffix_input.setMaximumHeight(100)
+        layout.addWidget(suffix_input)
+
+        # 预览标签
+        preview_label = QLabel(f"将对 {len(self.tasks)} 个任务的提示词添加后缀")
+        layout.addWidget(preview_label)
+
+        # 按钮
+        button_box = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        )
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+
+        # 显示对话框
+        if dialog.exec_() == QDialog.Accepted:
+            suffix = suffix_input.toPlainText().strip()
+            if not suffix:
+                QMessageBox.warning(self, "警告", "后缀不能为空")
+                return
+
+            # 给所有任务的提示词添加后缀
+            count = 0
+            for task in self.tasks:
+                if task.prompt:
+                    task.prompt = task.prompt + suffix
+                    # 更新表格中的提示词
+                    prompt_item = self.table.item(task.row_index, 1)
+                    if prompt_item:
+                        prompt_item.setText(task.prompt)
+                    count += 1
+
+            print(f"[后缀] 已为 {count} 个任务添加后缀: {suffix[:50]}...")
+            self.statusBar.showMessage(f"已为 {count} 个任务添加后缀")
+            QMessageBox.information(self, "完成", f"已为 {count} 个任务的提示词添加后缀")
 
     def closeEvent(self, event):
         """关闭窗口事件"""
